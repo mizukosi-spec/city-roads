@@ -119,6 +119,7 @@
   }
   .layer-toggle.on .toggle-dot { background:currentColor; }
   .layer-toggle[data-layer="traffic"]{ --lc:#444444; }
+  .layer-toggle[data-layer="admin"]  { --lc:#ff9d5c; }
   .layer-toggle[data-layer="river"] { --lc:#60b0ff; }
   .layer-toggle[data-layer="elev"]  { --lc:#64ffb4; }
   .layer-toggle[data-layer="land"]  { --lc:#ffd97d; }
@@ -258,6 +259,9 @@
       <button class="layer-toggle" data-layer="farm">
         <span class="toggle-dot"></span>🌾 農地
       </button>
+      <button class="layer-toggle" data-layer="admin">
+        <span class="toggle-dot"></span>🗾 行政界
+      </button>
       <button class="layer-toggle" data-layer="river">
         <span class="toggle-dot"></span>🌊 河川
       </button>
@@ -274,6 +278,9 @@
       <span id="elev-min">0m</span>
       <div id="elev-gradient"></div>
       <span id="elev-max">—m</span>
+    </div>
+    <div class="legend-box" id="admin-legend">
+      🗾 行政界：<div id="admin-legend-items" style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;"></div>
     </div>
     <div class="legend-box" id="traffic-legend">
       🚦 交通凡例：<div id="traffic-legend-items"></div>
@@ -297,6 +304,7 @@
     <span id="info-elev-line"  style="display:none">標高：<strong id="info-elev">—</strong><br></span>
     <span id="info-land-line"  style="display:none">土地利用：<strong id="info-land">—</strong><br></span>
     <span id="info-farm-line"  style="display:none">農地：<strong id="info-farm">—</strong><br></span>
+    <span id="info-admin-line" style="display:none">行政界：<strong id="info-admin">—</strong><br></span>
     データ：OpenStreetMap / 国土地理院 / Open-Meteo
   </div>
 </div>
@@ -311,8 +319,9 @@ const ctx    = canvas.getContext('2d');
 //  State
 // ══════════════════════════════════════════
 const state = {
-  roads: [], rivers: [], elevGrid: null, landPolys: [], farmPolys: [],
+  roads: [], rivers: [], riverPolys: [], elevGrid: null, landPolys: [], farmPolys: [],
   traffic: null,  // {expressway,national,prefecture,other,railway} 分類済み交通データ
+  admin: null,    // {pref:[], city:[], town:[]} 行政界
   cityName: '', bb: null,
   zoom: 1, panX: 0, panY: 0,
   dragging: false, dragStart: null,
@@ -320,9 +329,11 @@ const state = {
   bgDark: false,      // 地図描画時の背景（false=白）
   panelOpen: true,   // 起動画面表示中フラグ
   // 各レイヤーのON/OFF（複数同時可）
-  layers: { traffic: true, river: false, elev: false, land: false, farm: false },
+  layers: { traffic: true, river: false, elev: false, land: false, farm: false, admin: false },
   // 交通サブレイヤー表示フラグ
   trafficLayers: { expressway:true, national:true, prefecture:true, other:true, railway:true },
+  // 行政界サブレイヤー
+  adminLayers: { pref:true, city:true, town:false },
 };
 
 // ══════════════════════════════════════════
@@ -355,6 +366,10 @@ const LAND_COLORS_DARK = {
   vineyard:      'rgba(200,180,100,0.45)',
   scrub:         'rgba(140,180,100,0.45)',
   heath:         'rgba(180,160,100,0.45)',
+  place_of_worship: 'rgba(220,180,255,0.55)',
+  religious:     'rgba(220,180,255,0.55)',
+  retail:        'rgba(255,150,100,0.55)',
+  commercial:    'rgba(255,180,80,0.55)',
   _default:      'rgba(120,120,140,0.30)',
 };
 const LAND_COLORS_LIGHT = {
@@ -384,6 +399,10 @@ const LAND_COLORS_LIGHT = {
   vineyard:      'rgba(235,215,130,0.50)',
   scrub:         'rgba(180,220,130,0.50)',
   heath:         'rgba(220,200,130,0.50)',
+  place_of_worship: 'rgba(200,150,255,0.55)',
+  religious:     'rgba(200,150,255,0.55)',
+  retail:        'rgba(255,180,140,0.55)',
+  commercial:    'rgba(255,210,130,0.55)',
   _default:      'rgba(160,160,175,0.25)',
 };
 
@@ -396,6 +415,8 @@ const LAND_LABELS = {
   hospital:'病院', water:'水域', reservoir:'貯水池', quarry:'採石場',
   construction:'建設中', allotments:'市民農園', orchard:'果樹園',
   vineyard:'ブドウ園', scrub:'低木', heath:'荒地',
+  place_of_worship:'寺社・教会', religious:'宗教用地',
+  retail:'商業施設', commercial:'商業地',
 };
 
 // ══════════════════════════════════════════
@@ -430,6 +451,7 @@ document.querySelectorAll('.layer-toggle').forEach(btn => {
     // 初めてONにしたときデータ取得
     if (nowOn && state.bb) {
       if (layer === 'traffic'&& !state.traffic)               fetchTraffic();
+      if (layer === 'admin'  && !state.admin)                 fetchAdmin();
       if (layer === 'river'  && state.rivers.length   === 0) fetchAndParseRivers();
       if (layer === 'elev'   && !state.elevGrid)             fetchElevation();
       if (layer === 'land'   && state.landPolys.length === 0) fetchLanduse();
@@ -465,12 +487,30 @@ function draw() {
   if (state.layers.elev  && state.elevGrid)           drawElevation();
   if (state.layers.farm  && state.farmPolys.length)   drawFarm();
   if (state.layers.land  && state.landPolys.length)   drawLanduse();
-  if (state.layers.river && state.rivers.length) {
-    ctx.strokeStyle='#60b0ff'; ctx.lineWidth=1.4/state.zoom;
-    ctx.shadowColor='#60b0ff'; ctx.shadowBlur=state.bgDark?4/state.zoom:0;
-    drawLines(state.rivers);
+  if (state.layers.river) {
+    // 面データ（川幅ポリゴン）
+    if (state.riverPolys.length) {
+      ctx.shadowBlur=0;
+      const rColor=state.bgDark?'rgba(60,140,220,0.75)':'rgba(80,160,240,0.70)';
+      ctx.fillStyle=rColor;
+      for(const poly of state.riverPolys){
+        if(!poly||poly.length<3) continue;
+        ctx.beginPath(); ctx.moveTo(poly[0].x,poly[0].y);
+        for(let i=1;i<poly.length;i++) ctx.lineTo(poly[i].x,poly[i].y);
+        ctx.closePath(); ctx.fill();
+      }
+    }
+    // 線データ（中心線）
+    if (state.rivers.length) {
+      ctx.strokeStyle=state.bgDark?'#60b0ff':'#2080e0';
+      ctx.lineWidth=1.2/state.zoom;
+      ctx.shadowColor=state.bgDark?'#60b0ff':'transparent';
+      ctx.shadowBlur=state.bgDark?3/state.zoom:0;
+      drawLines(state.rivers);
+    }
   }
   if (state.layers.traffic && state.traffic) drawTraffic();
+  if (state.layers.admin  && state.admin)   drawAdmin();
   ctx.restore();
 }
 
@@ -590,6 +630,8 @@ function updateInfoPanel() {
   document.getElementById('info-elev-line').style.display  = l.elev  ?'':'none';
   document.getElementById('info-land-line').style.display  = l.land  ?'':'none';
   document.getElementById('info-farm-line').style.display  = l.farm  ?'':'none';
+  document.getElementById('info-admin-line').style.display = l.admin ?'':'none';
+  if(state.admin){ const t=state.admin; document.getElementById('info-admin').textContent=(t.pref||[]).length+'都道府県 '+(t.city||[]).length+'市区町村'; }
   if(state.traffic){
     const t=state.traffic;
     const total=(t.expressway||[]).length+(t.national||[]).length+(t.prefecture||[]).length+(t.other||[]).length+(t.railway||[]).length;
@@ -603,6 +645,8 @@ function updateInfoPanel() {
 
 function updateLegends() {
   const l=state.layers;
+  document.getElementById('admin-legend').classList.toggle('visible', l.admin&&!!state.admin);
+  if(l.admin&&state.admin) buildAdminLegend();
   document.getElementById('traffic-legend').classList.toggle('visible', l.traffic&&!!state.traffic);
   if(l.traffic&&state.traffic) buildTrafficLegend();
   document.getElementById('elev-legend').classList.toggle('visible', l.elev&&!!state.elevGrid);
@@ -711,6 +755,120 @@ function parseWays(data,bb) {
     if(pts.length>=2) segs.push(pts);
   }
   return segs;
+}
+
+
+// ══════════════════════════════════════════
+//  行政界レイヤー
+// ══════════════════════════════════════════
+
+// Overpassから行政界の関係（relation）を取得し、構成wayを結合
+async function fetchAdmin() {
+  const bb=state.bb; const {minLat:s,minLon:w,maxLat:n,maxLon:e}=bb;
+  showLoading(state.cityName,'行政界データを取得中…',10);
+  try {
+    // 都道府県(4)・市区町村(6/7)・大字(8) を一括取得
+    const q=`[out:json][timeout:90];
+(
+  relation["boundary"="administrative"]["admin_level"="4"](${s},${w},${n},${e});
+  relation["boundary"="administrative"]["admin_level"~"6|7"](${s},${w},${n},${e});
+  relation["boundary"="administrative"]["admin_level"="8"](${s},${w},${n},${e});
+);
+(._;>;);out body;`;
+    setProgress(20);
+    const data = await overpassFetch(q);
+    setProgress(70);
+    state.admin = parseAdmin(data, bb);
+    updateInfoPanel(); updateLegends(); draw();
+    toast(`行政界 都道府県${state.admin.pref.length}件 市区町村${state.admin.city.length}件`);
+  } catch(err){ toast('行政界エラー: '+err.message, 5000); }
+  finally { hideLoading(); }
+}
+
+async function fetchAdminSilent(bb) {
+  const {minLat:s,minLon:w,maxLat:n,maxLon:e}=bb;
+  const q=`[out:json][timeout:90];(relation["boundary"="administrative"]["admin_level"="4"](${s},${w},${n},${e});relation["boundary"="administrative"]["admin_level"~"6|7"](${s},${w},${n},${e});relation["boundary"="administrative"]["admin_level"="8"](${s},${w},${n},${e}););(._;>;);out body;`;
+  state.admin = parseAdmin(await overpassFetch(q), bb);
+}
+
+function parseAdmin(data, bb) {
+  const nodes={}, ways={};
+  for(const el of data.elements){
+    if(el.type==='node') nodes[el.id]={lat:el.lat,lon:el.lon};
+    if(el.type==='way')  ways[el.id]=el.nodes;
+  }
+  const scale=getScale(bb);
+  const result={pref:[], city:[], town:[]};
+
+  for(const el of data.elements){
+    if(el.type!=='relation') continue;
+    const tags=el.tags||{};
+    const level=parseInt(tags.admin_level||'0');
+    const cat = level===4?'pref': level<=7?'city':'town';
+    // relation の outer member way を結合してポリライン群に
+    const lines=[];
+    for(const m of (el.members||[])){
+      if(m.type!=='way') continue;
+      const nodeIds=ways[m.ref];
+      if(!nodeIds) continue;
+      const pts=[];
+      for(const nid of nodeIds){
+        const n=nodes[nid];
+        if(n) pts.push(project(n.lat,n.lon,bb,scale));
+      }
+      if(pts.length>=2) lines.push(pts);
+    }
+    if(lines.length) result[cat].push({name:tags.name||'', lines});
+  }
+  return result;
+}
+
+// 行政界スタイル
+const ADMIN_STYLES = {
+  pref: { dark:'#ff9d5c', light:'#c04000', width:2.0, dash:[] },
+  city: { dark:'#ffd97d', light:'#807000', width:1.0, dash:[] },
+  town: { dark:'rgba(200,200,200,0.7)', light:'rgba(100,100,100,0.6)', width:0.5, dash:[4,4] },
+};
+const ADMIN_LABELS = { pref:'都道府県界', city:'市区町村界', town:'大字・町丁目界' };
+
+function drawAdmin() {
+  const al=state.adminLayers;
+  const isDark=state.bgDark;
+  ctx.shadowBlur=0;
+  for(const [cat, style] of Object.entries(ADMIN_STYLES)){
+    if(!al[cat]||!state.admin[cat]||!state.admin[cat].length) continue;
+    ctx.strokeStyle=isDark?style.dark:style.light;
+    ctx.lineWidth=style.width/state.zoom;
+    ctx.setLineDash(style.dash.map(d=>d/state.zoom));
+    for(const boundary of state.admin[cat]){
+      for(const line of boundary.lines){
+        if(line.length<2) continue;
+        ctx.beginPath(); ctx.moveTo(line[0].x,line[0].y);
+        for(let i=1;i<line.length;i++) ctx.lineTo(line[i].x,line[i].y);
+        ctx.stroke();
+      }
+    }
+  }
+  ctx.setLineDash([]);
+}
+
+function buildAdminLegend(){
+  const container=document.getElementById('admin-legend-items');
+  container.innerHTML='';
+  const isDark=state.bgDark;
+  for(const [cat,style] of Object.entries(ADMIN_STYLES)){
+    if(!state.admin[cat]||!state.admin[cat].length) continue;
+    const color=isDark?style.dark:style.light;
+    const item=document.createElement('div');
+    item.style.cssText='display:flex;align-items:center;gap:3px;cursor:pointer;padding:1px 4px;border-radius:3px;';
+    item.style.opacity=state.adminLayers[cat]?'1':'0.4';
+    item.innerHTML=`<div style="width:20px;height:2px;background:${color};flex-shrink:0"></div><span style="font-size:.7rem">${ADMIN_LABELS[cat]}</span>`;
+    item.addEventListener('click',()=>{
+      state.adminLayers[cat]=!state.adminLayers[cat];
+      buildAdminLegend(); draw();
+    });
+    container.appendChild(item);
+  }
 }
 
 // ── 交通レイヤー（道路種別・鉄道分類） ──
@@ -832,13 +990,34 @@ function buildTrafficLegend(){
 }
 
 // ── 河川 ──
+function parseRiverPolys(data, bb) {
+  const nodes={};
+  for(const el of data.elements) if(el.type==='node') nodes[el.id]={lat:el.lat,lon:el.lon};
+  const scale=getScale(bb); const polys=[];
+  for(const el of data.elements){
+    if(el.type!=='way') continue;
+    if(!el.nodes||el.nodes[0]!==el.nodes[el.nodes.length-1]) continue; // 閉じたwayのみ
+    const pts=[];
+    for(const nid of el.nodes){const n=nodes[nid];if(n)pts.push(project(n.lat,n.lon,bb,scale));}
+    if(pts.length>=3) polys.push(pts);
+  }
+  return polys;
+}
+
 async function fetchAndParseRivers() {
   const bb=state.bb; const {minLat:s,minLon:w,maxLat:n,maxLon:e}=bb;
   showLoading(state.cityName,'河川データを取得中…',10);
   try {
-    const q=`[out:json][timeout:60];way["waterway"~"river|stream|canal|drain|creek"](${s},${w},${n},${e});(._;>;);out body;`;
-    state.rivers=parseWays(await overpassFetch(q),bb);
-    updateInfoPanel(); draw(); toast(`河川 ${state.rivers.length.toLocaleString()} 本`);
+    // 線データ（中心線）
+    const qLine=`[out:json][timeout:60];way["waterway"~"river|stream|canal|drain|creek"](${s},${w},${n},${e});(._;>;);out body;`;
+    // 面データ（川幅ポリゴン）
+    const qPoly=`[out:json][timeout:60];(way["natural"="water"]["water"~"river|canal|lake|pond|reservoir"](${s},${w},${n},${e});way["waterway"="riverbank"](${s},${w},${n},${e}););(._;>;);out body;`;
+    setProgress(20);
+    const [lineData, polyData] = await Promise.all([overpassFetch(qLine), overpassFetch(qPoly)]);
+    state.rivers = parseWays(lineData, bb);
+    state.riverPolys = parseRiverPolys(polyData, bb);
+    updateInfoPanel(); draw();
+    toast(`河川 線${state.rivers.length.toLocaleString()}本 ／ 面${state.riverPolys.length.toLocaleString()}件`);
   } catch(err){toast('河川エラー: '+err.message,5000);}
   finally{hideLoading();}
 }
@@ -854,7 +1033,8 @@ async function fetchLanduse() {
   way["landuse"](${s},${w},${n},${e});
   way["natural"~"wood|scrub|heath|grassland|wetland|water|beach"](${s},${w},${n},${e});
   way["leisure"~"park|garden|recreation_ground|golf_course|sports_centre"](${s},${w},${n},${e});
-  way["amenity"~"school|university|hospital|cemetery"](${s},${w},${n},${e});
+  way["amenity"~"school|university|hospital|cemetery|place_of_worship"](${s},${w},${n},${e});
+  way["landuse"~"retail|commercial"](${s},${w},${n},${e});
 );
 (._;>;);out body;`;
     setProgress(30);
@@ -882,7 +1062,7 @@ function parseLandPolys(data,bb) {
     if(first!==last) continue;
     // 土地利用タイプを決定
     const tags=el.tags||{};
-    const type=tags.landuse||tags.natural||tags.leisure||tags.amenity||'_default';
+    const type=tags.amenity||tags.landuse||tags.natural||tags.leisure||'_default';
     polys.push({type, rings:[pts]});
   }
   return polys;
@@ -1080,7 +1260,7 @@ async function loadCity(item) {
   showLoading(name,'道路データを取得中…',5);
   try {
     await fetchTrafficSilent(bb); setProgress(40);
-    state.rivers=[]; state.elevGrid=null; state.landPolys=[]; state.farmPolys=[]; state.traffic=null;
+    state.rivers=[]; state.riverPolys=[]; state.elevGrid=null; state.landPolys=[]; state.farmPolys=[]; state.traffic=null; state.admin=null;
     state.cityName=name; state.bb=bb;
     state.zoom=1; state.panX=0; state.panY=0;
     setProgress(60);
@@ -1088,6 +1268,7 @@ async function loadCity(item) {
     // ON中のレイヤーを並列取得
     const tasks=[];
     // trafficはすでに取得済み
+    if(state.layers.admin) tasks.push(fetchAdminSilent(bb));
     if(state.layers.river) tasks.push(fetchAndParseRiversSilent(bb));
     if(state.layers.elev)  tasks.push(fetchElevationSilent(bb));
     if(state.layers.land)  tasks.push(fetchLanduseSilent(bb));
@@ -1104,8 +1285,11 @@ async function loadCity(item) {
 // loadCity内で使うサイレント版（ローディングUI管理を loadCity に任せる）
 async function fetchAndParseRiversSilent(bb){
   const {minLat:s,minLon:w,maxLat:n,maxLon:e}=bb;
-  const q=`[out:json][timeout:60];way["waterway"~"river|stream|canal|drain|creek"](${s},${w},${n},${e});(._;>;);out body;`;
-  state.rivers=parseWays(await overpassFetch(q),bb);
+  const qLine=`[out:json][timeout:60];way["waterway"~"river|stream|canal|drain|creek"](${s},${w},${n},${e});(._;>;);out body;`;
+  const qPoly=`[out:json][timeout:60];(way["natural"="water"]["water"~"river|canal|lake|pond|reservoir"](${s},${w},${n},${e});way["waterway"="riverbank"](${s},${w},${n},${e}););(._;>;);out body;`;
+  const [lineData, polyData] = await Promise.all([overpassFetch(qLine), overpassFetch(qPoly)]);
+  state.rivers = parseWays(lineData, bb);
+  state.riverPolys = parseRiverPolys(polyData, bb);
 }
 async function fetchElevationSilent(bb){
   const japan=isJapan(bb);
@@ -1159,11 +1343,11 @@ document.getElementById('btn-download').addEventListener('click',()=>{
   const a=document.createElement('a');a.download=(state.cityName||'city-map')+'.png';a.href=canvas.toDataURL('image/png');a.click();toast('PNG を保存しました 💾');
 });
 document.getElementById('btn-reset').addEventListener('click',()=>{
-  state.roads=[];state.rivers=[];state.elevGrid=null;state.landPolys=[];state.farmPolys=[];state.traffic=null;
+  state.roads=[];state.rivers=[];state.riverPolys=[];state.elevGrid=null;state.landPolys=[];state.farmPolys=[];state.traffic=null;state.admin=null;
   state.cityName='';state.bb=null;state.zoom=1;state.panX=0;state.panY=0;
   state.panelOpen=true;
   draw();
-  ['mini-search-wrap','toolbar','info','city-label','traffic-legend','elev-legend','land-legend','farm-legend'].forEach(id=>document.getElementById(id).classList.remove('visible'));
+  ['mini-search-wrap','toolbar','info','city-label','admin-legend','traffic-legend','elev-legend','land-legend','farm-legend'].forEach(id=>document.getElementById(id).classList.remove('visible'));
   document.getElementById('panel').classList.remove('hidden');
   searchEl.value='';
 });
@@ -1175,34 +1359,35 @@ document.getElementById('btn-bg').addEventListener('click',()=>{state.bgDark=!st
 const FARM_COLORS_DARK = {
   farmland:            'rgba(168,217,110,0.60)',
   farm:                'rgba(168,217,110,0.60)',
-  farmyard:            'rgba(200,200,100,0.50)',
-  orchard:             'rgba(130,210,90,0.60)',
-  vineyard:            'rgba(190,170,80,0.60)',
-  allotments:          'rgba(150,220,110,0.55)',
-  greenhouse_horticulture: 'rgba(180,240,160,0.55)',
+  farmyard:            'rgba(168,217,110,0.55)',
+  allotments:          'rgba(168,217,110,0.55)',
+  paddy:               'rgba(100,200,160,0.65)',
+  orchard:             'rgba(240,220,40,0.70)',
+  vineyard:            'rgba(200,180,60,0.65)',
+  greenhouse_horticulture: 'rgba(240,140,40,0.70)',
   meadow:              'rgba(140,220,120,0.50)',
   plant_nursery:       'rgba(120,200,100,0.50)',
-  paddy:               'rgba(100,200,160,0.55)',
   _default:            'rgba(150,210,100,0.45)',
 };
 const FARM_COLORS_LIGHT = {
   farmland:            'rgba(200,240,140,0.65)',
   farm:                'rgba(200,240,140,0.65)',
-  farmyard:            'rgba(230,230,130,0.60)',
-  orchard:             'rgba(170,240,120,0.65)',
-  vineyard:            'rgba(230,210,110,0.65)',
-  allotments:          'rgba(190,250,150,0.60)',
-  greenhouse_horticulture: 'rgba(210,255,190,0.65)',
+  farmyard:            'rgba(200,240,140,0.60)',
+  allotments:          'rgba(200,240,140,0.60)',
+  paddy:               'rgba(140,240,200,0.65)',
+  orchard:             'rgba(255,235,0,0.75)',
+  vineyard:            'rgba(230,210,60,0.70)',
+  greenhouse_horticulture: 'rgba(255,150,30,0.75)',
   meadow:              'rgba(180,250,160,0.55)',
   plant_nursery:       'rgba(160,240,140,0.55)',
-  paddy:               'rgba(140,240,200,0.60)',
   _default:            'rgba(190,245,140,0.50)',
 };
 const FARM_LABELS = {
-  farmland:'農地', farm:'農地', farmyard:'農場',
-  orchard:'果樹園', vineyard:'ブドウ園', allotments:'市民農園',
+  farmland:'農地（畑）', farm:'農地（畑）', farmyard:'農地（農場）',
+  allotments:'農地（市民農園）', paddy:'水田',
+  orchard:'果樹園', vineyard:'ブドウ園',
   greenhouse_horticulture:'温室栽培', meadow:'牧草地',
-  plant_nursery:'苗圃', paddy:'水田',
+  plant_nursery:'苗圃',
 };
 
 function drawFarm() {
@@ -1243,7 +1428,7 @@ function parseFarmPolys(data,bb){
   return polys;
 }
 
-const FARM_QUERY_TYPES = 'farmland|farm|farmyard|orchard|vineyard|allotments|greenhouse_horticulture|meadow|plant_nursery|paddy';
+const FARM_QUERY_TYPES = 'farmland|farm|farmyard|paddy|orchard|vineyard|allotments|greenhouse_horticulture|meadow|plant_nursery';
 
 async function fetchFarm(){
   const bb=state.bb; const {minLat:s,minLon:w,maxLat:n,maxLon:e}=bb;
