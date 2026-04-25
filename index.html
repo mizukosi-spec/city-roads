@@ -118,7 +118,7 @@
     flex-shrink:0;transition:background .2s;
   }
   .layer-toggle.on .toggle-dot { background:currentColor; }
-  .layer-toggle[data-layer="road"]  { --lc:#c8c0ff; }
+  .layer-toggle[data-layer="traffic"]{ --lc:#444444; }
   .layer-toggle[data-layer="river"] { --lc:#60b0ff; }
   .layer-toggle[data-layer="elev"]  { --lc:#64ffb4; }
   .layer-toggle[data-layer="land"]  { --lc:#ffd97d; }
@@ -245,8 +245,8 @@
     <!-- Layer toggles -->
     <div id="layer-section">
       <div class="layer-section-title">レイヤー（複数選択可）</div>
-      <button class="layer-toggle on" data-layer="road">
-        <span class="toggle-dot"></span>🛣️ 道路
+      <button class="layer-toggle on" data-layer="traffic">
+        <span class="toggle-dot"></span>🚦 交通
       </button>
       <button class="layer-toggle" data-layer="land">
         <span class="toggle-dot"></span>🏘️ 土地利用
@@ -274,6 +274,9 @@
       <div id="elev-gradient"></div>
       <span id="elev-max">—m</span>
     </div>
+    <div class="legend-box" id="traffic-legend">
+      🚦 交通凡例：<div id="traffic-legend-items"></div>
+    </div>
     <div class="legend-box" id="land-legend">
       🏘️ 土地利用：
       <div id="land-legend-items"></div>
@@ -288,7 +291,7 @@
 
   <div id="info">
     <strong id="info-city">—</strong><br>
-    <span id="info-road-line">道路数：<strong id="info-roads">—</strong><br></span>
+    <span id="info-road-line">交通：<strong id="info-roads">—</strong><br></span>
     <span id="info-river-line" style="display:none">河川数：<strong id="info-rivers">—</strong><br></span>
     <span id="info-elev-line"  style="display:none">標高：<strong id="info-elev">—</strong><br></span>
     <span id="info-land-line"  style="display:none">土地利用：<strong id="info-land">—</strong><br></span>
@@ -308,13 +311,16 @@ const ctx    = canvas.getContext('2d');
 // ══════════════════════════════════════════
 const state = {
   roads: [], rivers: [], elevGrid: null, landPolys: [], farmPolys: [],
+  traffic: null,  // {expressway,national,prefecture,other,railway} 分類済み交通データ
   cityName: '', bb: null,
   zoom: 1, panX: 0, panY: 0,
   dragging: false, dragStart: null,
-  lineColor: '#c8c0ff',
-  bgDark: true,
+  lineColor: '#1a1a1a',
+  bgDark: false,
   // 各レイヤーのON/OFF（複数同時可）
-  layers: { road: true, river: false, elev: false, land: false, farm: false },
+  layers: { traffic: true, river: false, elev: false, land: false, farm: false },
+  // 交通サブレイヤー表示フラグ
+  trafficLayers: { expressway:true, national:true, prefecture:true, other:true, railway:true },
 };
 
 // ══════════════════════════════════════════
@@ -394,8 +400,8 @@ const LAND_LABELS = {
 //  Palette
 // ══════════════════════════════════════════
 const PALETTES = [
-  {label:'紫光',color:'#c8c0ff'},{label:'白',color:'#ffffff'},
-  {label:'黒',color:'#1a1a1a'},{label:'金',color:'#ffd97d'},
+  {label:'黒',color:'#1a1a1a'},{label:'白',color:'#ffffff'},
+  {label:'紫光',color:'#c8c0ff'},{label:'金',color:'#ffd97d'},
   {label:'珊瑚',color:'#ff6a9e'},{label:'翡翠',color:'#64ffda'},
   {label:'橙',color:'#ff9d5c'},{label:'青',color:'#60b0ff'},
 ];
@@ -421,6 +427,7 @@ document.querySelectorAll('.layer-toggle').forEach(btn => {
     btn.classList.toggle('on', nowOn);
     // 初めてONにしたときデータ取得
     if (nowOn && state.bb) {
+      if (layer === 'traffic'&& !state.traffic)               fetchTraffic();
       if (layer === 'river'  && state.rivers.length   === 0) fetchAndParseRivers();
       if (layer === 'elev'   && !state.elevGrid)             fetchElevation();
       if (layer === 'land'   && state.landPolys.length === 0) fetchLanduse();
@@ -441,7 +448,7 @@ window.addEventListener('resize', resize); resize();
 function draw() {
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0,0,W,H);
-  ctx.fillStyle = state.bgDark ? '#0a0a0f' : '#f5f5f8';
+  ctx.fillStyle = state.bgDark ? '#0a0a0f' : '#ffffff';
   ctx.fillRect(0,0,W,H);
 
   const hasData = state.roads.length||state.rivers.length||state.elevGrid||state.landPolys.length;
@@ -461,11 +468,7 @@ function draw() {
     ctx.shadowColor='#60b0ff'; ctx.shadowBlur=state.bgDark?4/state.zoom:0;
     drawLines(state.rivers);
   }
-  if (state.layers.road  && state.roads.length) {
-    ctx.strokeStyle=state.lineColor; ctx.lineWidth=0.8/state.zoom;
-    ctx.shadowColor=state.lineColor; ctx.shadowBlur=state.bgDark?2/state.zoom:0;
-    drawLines(state.roads);
-  }
+  if (state.layers.traffic && state.traffic) drawTraffic();
   ctx.restore();
 }
 
@@ -580,12 +583,16 @@ function hideLoading(){ document.getElementById('loading').classList.remove('vis
 // ══════════════════════════════════════════
 function updateInfoPanel() {
   const l=state.layers;
-  document.getElementById('info-road-line').style.display  = l.road  ?'':'none';
+  document.getElementById('info-road-line').style.display  = l.traffic?'':'none';
   document.getElementById('info-river-line').style.display = l.river ?'':'none';
   document.getElementById('info-elev-line').style.display  = l.elev  ?'':'none';
   document.getElementById('info-land-line').style.display  = l.land  ?'':'none';
   document.getElementById('info-farm-line').style.display  = l.farm  ?'':'none';
-  document.getElementById('info-roads').textContent   = state.roads.length.toLocaleString()+' 本';
+  if(state.traffic){
+    const t=state.traffic;
+    const total=(t.expressway||[]).length+(t.national||[]).length+(t.prefecture||[]).length+(t.other||[]).length+(t.railway||[]).length;
+    document.getElementById('info-roads').textContent=total.toLocaleString()+' 本';
+  }
   document.getElementById('info-rivers').textContent  = state.rivers.length.toLocaleString()+' 本';
   document.getElementById('info-land').textContent    = state.landPolys.length.toLocaleString()+' 区画';
   document.getElementById('info-farm').textContent    = state.farmPolys.length.toLocaleString()+' 区画';
@@ -594,6 +601,8 @@ function updateInfoPanel() {
 
 function updateLegends() {
   const l=state.layers;
+  document.getElementById('traffic-legend').classList.toggle('visible', l.traffic&&!!state.traffic);
+  if(l.traffic&&state.traffic) buildTrafficLegend();
   document.getElementById('elev-legend').classList.toggle('visible', l.elev&&!!state.elevGrid);
   document.getElementById('land-legend').classList.toggle('visible', l.land&&state.landPolys.length>0);
   document.getElementById('farm-legend').classList.toggle('visible', l.farm&&state.farmPolys.length>0);
@@ -702,11 +711,122 @@ function parseWays(data,bb) {
   return segs;
 }
 
-// ── 道路 ──
-async function fetchRoads(bb) {
+// ── 交通レイヤー（道路種別・鉄道分類） ──
+// highway タグから種別分類
+function classifyHighway(tag) {
+  if(!tag) return 'other';
+  if(['motorway','motorway_link','trunk','trunk_link'].includes(tag)) return 'expressway';
+  if(['primary','primary_link'].includes(tag)) return 'national';
+  if(['secondary','secondary_link','tertiary','tertiary_link'].includes(tag)) return 'prefecture';
+  return 'other';
+}
+
+function parseTraffic(data, bb) {
+  const nodes={};
+  for(const el of data.elements) if(el.type==='node') nodes[el.id]={lat:el.lat,lon:el.lon};
+  const scale=getScale(bb);
+  const result={expressway:[],national:[],prefecture:[],other:[],railway:[]};
+  for(const el of data.elements){
+    if(el.type!=='way') continue;
+    const pts=[];
+    for(const nid of el.nodes){const n=nodes[nid];if(n)pts.push(project(n.lat,n.lon,bb,scale));}
+    if(pts.length<2) continue;
+    const tags=el.tags||{};
+    if(tags.railway){
+      result.railway.push(pts);
+    } else {
+      const cat=classifyHighway(tags.highway);
+      result[cat].push(pts);
+    }
+  }
+  return result;
+}
+
+async function fetchTraffic() {
+  const bb=state.bb; const {minLat:s,minLon:w,maxLat:n,maxLon:e}=bb;
+  showLoading(state.cityName,'交通データを取得中…',10);
+  try {
+    const q=`[out:json][timeout:90];(way["highway"](${s},${w},${n},${e});way["railway"~"rail|subway|tram|light_rail|monorail"](${s},${w},${n},${e}););(._;>;);out body;`;
+    setProgress(40);
+    const data=await overpassFetch(q);
+    setProgress(80);
+    state.traffic=parseTraffic(data,bb);
+    // 後方互換のため roads も維持
+    state.roads=[...state.traffic.expressway,...state.traffic.national,...state.traffic.prefecture,...state.traffic.other];
+    updateInfoPanel(); updateLegends(); draw();
+    const total=state.roads.length+state.traffic.railway.length;
+    toast(`交通データ ${total.toLocaleString()} 本`);
+  } catch(err){toast('交通エラー: '+err.message,5000);}
+  finally{hideLoading();}
+}
+
+async function fetchTrafficSilent(bb) {
   const {minLat:s,minLon:w,maxLat:n,maxLon:e}=bb;
-  const q=`[out:json][timeout:60];way["highway"](${s},${w},${n},${e});(._;>;);out body;`;
-  return parseWays(await overpassFetch(q), bb);
+  const q=`[out:json][timeout:90];(way["highway"](${s},${w},${n},${e});way["railway"~"rail|subway|tram|light_rail|monorail"](${s},${w},${n},${e}););(._;>;);out body;`;
+  state.traffic=parseTraffic(await overpassFetch(q),bb);
+  state.roads=[...state.traffic.expressway,...state.traffic.national,...state.traffic.prefecture,...state.traffic.other];
+}
+
+// 交通レイヤー描画
+const TRAFFIC_STYLES = {
+  expressway: { dark:'#ff6060', light:'#e00000', width:2.8 },
+  national:   { dark:'#ffb040', light:'#d06000', width:1.8 },
+  prefecture: { dark:'#ffe060', light:'#909000', width:1.2 },
+  other:      { dark:'#c0c0c0', light:'#606060', width:0.7 },
+  railway:    { dark:'#80e0ff', light:'#0060c0', width:1.6, dash:true },
+};
+
+function drawTraffic() {
+  const tl=state.trafficLayers;
+  const isDark=state.bgDark;
+  // 描画順：その他→県道→国道→高速→鉄道（上に来るほど重要）
+  const order=['other','prefecture','national','expressway','railway'];
+  for(const cat of order){
+    if(!tl[cat]||!state.traffic[cat]||!state.traffic[cat].length) continue;
+    const s=TRAFFIC_STYLES[cat];
+    ctx.strokeStyle=isDark?s.dark:s.light;
+    ctx.lineWidth=s.width/state.zoom;
+    ctx.shadowColor=isDark?(s.dark):'transparent';
+    ctx.shadowBlur=isDark?(s.width*1.5/state.zoom):0;
+    if(s.dash){
+      ctx.setLineDash([6/state.zoom,3/state.zoom]);
+    } else {
+      ctx.setLineDash([]);
+    }
+    drawLines(state.traffic[cat]);
+  }
+  ctx.setLineDash([]);
+  ctx.shadowBlur=0;
+}
+
+function buildTrafficLegend(){
+  const container=document.getElementById('traffic-legend-items');
+  container.innerHTML='';
+  const isDark=state.bgDark;
+  const items=[
+    {cat:'expressway',label:'高速道路'},
+    {cat:'national',  label:'国道'},
+    {cat:'prefecture',label:'県道'},
+    {cat:'other',     label:'その他道路'},
+    {cat:'railway',   label:'鉄道'},
+  ];
+  for(const {cat,label} of items){
+    if(!state.traffic[cat]||!state.traffic[cat].length) continue;
+    const s=TRAFFIC_STYLES[cat];
+    const color=isDark?s.dark:s.light;
+    const item=document.createElement('div');
+    item.className='land-legend-item';
+    item.style.cssText='display:flex;align-items:center;gap:4px;cursor:pointer;padding:1px 3px;border-radius:3px;';
+    const active=state.trafficLayers[cat];
+    item.style.opacity=active?'1':'0.4';
+    item.innerHTML=`<div style="width:22px;height:3px;background:${color};border-radius:2px;${s.dash?'border-top:2px dashed '+color+';background:transparent;':''};flex-shrink:0"></div><span style="font-size:.72rem">${label}</span>`;
+    item.title=`${label}をクリックで表示切替`;
+    item.addEventListener('click',()=>{
+      state.trafficLayers[cat]=!state.trafficLayers[cat];
+      buildTrafficLegend(); draw();
+    });
+    container.appendChild(item);
+  }
 }
 
 // ── 河川 ──
@@ -866,14 +986,15 @@ async function loadCity(item) {
   document.getElementById('panel').classList.add('hidden');
   showLoading(name,'道路データを取得中…',5);
   try {
-    state.roads=await fetchRoads(bb); setProgress(40);
-    state.rivers=[]; state.elevGrid=null; state.landPolys=[]; state.farmPolys=[];
+    await fetchTrafficSilent(bb); setProgress(40);
+    state.rivers=[]; state.elevGrid=null; state.landPolys=[]; state.farmPolys=[]; state.traffic=null;
     state.cityName=name; state.bb=bb;
     state.zoom=1; state.panX=0; state.panY=0;
     setProgress(60);
 
     // ON中のレイヤーを並列取得
     const tasks=[];
+    // trafficはすでに取得済み
     if(state.layers.river) tasks.push(fetchAndParseRiversSilent(bb));
     if(state.layers.elev)  tasks.push(fetchElevationSilent(bb));
     if(state.layers.land)  tasks.push(fetchLanduseSilent(bb));
@@ -944,10 +1065,10 @@ document.getElementById('btn-download').addEventListener('click',()=>{
   const a=document.createElement('a');a.download=(state.cityName||'city-map')+'.png';a.href=canvas.toDataURL('image/png');a.click();toast('PNG を保存しました 💾');
 });
 document.getElementById('btn-reset').addEventListener('click',()=>{
-  state.roads=[];state.rivers=[];state.elevGrid=null;state.landPolys=[];state.farmPolys=[];
+  state.roads=[];state.rivers=[];state.elevGrid=null;state.landPolys=[];state.farmPolys=[];state.traffic=null;
   state.cityName='';state.bb=null;state.zoom=1;state.panX=0;state.panY=0;
   draw();
-  ['mini-search-wrap','toolbar','info','city-label','elev-legend','land-legend','farm-legend'].forEach(id=>document.getElementById(id).classList.remove('visible'));
+  ['mini-search-wrap','toolbar','info','city-label','traffic-legend','elev-legend','land-legend','farm-legend'].forEach(id=>document.getElementById(id).classList.remove('visible'));
   document.getElementById('panel').classList.remove('hidden');
   searchEl.value='';
 });
