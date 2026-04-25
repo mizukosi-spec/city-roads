@@ -228,7 +228,7 @@
 <div id="ui">
   <div id="panel">
     <h1 class="panel-title">まちの道路を描く</h1>
-    <p class="panel-sub">OpenStreetMapのデータを使って<br>都市の道路・河川・標高・土地利用・農地を描画します</p>
+    <p class="panel-sub">OpenStreetMapのデータを使って<br>都市の道路・河川・標高（国土地理院/Open-Meteo）・土地利用・農地を描画します</p>
     <div class="search-wrap">
       <input id="search" type="text" placeholder="都市名を入力（名古屋、大阪、Tokyo…）" autocomplete="off" spellcheck="false">
       <button class="search-btn" id="search-go" title="検索">🔍</button>
@@ -293,7 +293,7 @@
     <span id="info-elev-line"  style="display:none">標高：<strong id="info-elev">—</strong><br></span>
     <span id="info-land-line"  style="display:none">土地利用：<strong id="info-land">—</strong><br></span>
     <span id="info-farm-line"  style="display:none">農地：<strong id="info-farm">—</strong><br></span>
-    データ：OpenStreetMap / Open-Meteo
+    データ：OpenStreetMap / 国土地理院 / Open-Meteo
   </div>
 </div>
 
@@ -589,7 +589,7 @@ function updateInfoPanel() {
   document.getElementById('info-rivers').textContent  = state.rivers.length.toLocaleString()+' 本';
   document.getElementById('info-land').textContent    = state.landPolys.length.toLocaleString()+' 区画';
   document.getElementById('info-farm').textContent    = state.farmPolys.length.toLocaleString()+' 区画';
-  if (state.elevGrid) document.getElementById('info-elev').textContent = `${state.elevGrid.minE}m〜${state.elevGrid.maxE}m`;
+  if (state.elevGrid) document.getElementById('info-elev').textContent = `${state.elevGrid.minE}m〜${state.elevGrid.maxE}m（${state.elevGrid.source||'—'}）`;
 }
 
 function updateLegends() {
@@ -767,33 +767,91 @@ function parseLandPolys(data,bb) {
 }
 
 // ── 標高 ──
+
+// 日本範囲判定（おおよそ）
+function isJapan(bb) {
+  const cLat=(bb.minLat+bb.maxLat)/2, cLon=(bb.minLon+bb.maxLon)/2;
+  return cLat>=24&&cLat<=46&&cLon>=122&&cLon<=146;
+}
+
+// 国土地理院 標高API（1点）
+async function gsiElevation(lat,lon) {
+  const url=`https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php?lon=${lon}&lat=${lat}&outtype=JSON`;
+  const r=await fetch(url); if(!r.ok) return null;
+  const j=await r.json();
+  return (j.elevation!=null&&j.elevation!=='-----') ? parseFloat(j.elevation) : null;
+}
+
+// Open-Meteo（最大100点一括）
+async function openMeteoElevation(latArr,lonArr) {
+  const url=`https://api.open-meteo.com/v1/elevation?latitude=${latArr.join(',')}&longitude=${lonArr.join(',')}`;
+  const r=await fetch(url); if(!r.ok) throw new Error('Open-Meteo HTTP '+r.status);
+  return (await r.json()).elevation;
+}
+
+// グリッド標高取得（日本→国土地理院 / 海外→Open-Meteo）
+async function fetchElevGrid(bb, ROWS, COLS, onProgress) {
+  const dLat=(bb.maxLat-bb.minLat)/(ROWS-1), dLon=(bb.maxLon-bb.minLon)/(COLS-1);
+  const latArr=[], lonArr=[];
+  for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++){
+    latArr.push(parseFloat((bb.minLat+r*dLat).toFixed(5)));
+    lonArr.push(parseFloat((bb.minLon+c*dLon).toFixed(5)));
+  }
+
+  let flat;
+  const japan = isJapan(bb);
+
+  if(japan) {
+    // 国土地理院APIは1点ずつ → 並列で取得（過負荷にならないよう5並列）
+    flat = new Array(ROWS*COLS).fill(null);
+    const BATCH=5;
+    for(let i=0;i<flat.length;i+=BATCH){
+      const end=Math.min(i+BATCH,flat.length);
+      const results=await Promise.all(
+        Array.from({length:end-i},(_,k)=>gsiElevation(latArr[i+k],lonArr[i+k]))
+      );
+      for(let k=0;k<results.length;k++) flat[i+k]=results[k];
+      if(onProgress) onProgress(Math.round((end/flat.length)*70)+10);
+      // レート制限対策：少し待つ
+      if(end<flat.length) await new Promise(res=>setTimeout(res,80));
+    }
+  } else {
+    flat=await openMeteoElevation(latArr.map(v=>v.toFixed(5)),lonArr.map(v=>v.toFixed(5)));
+    if(onProgress) onProgress(80);
+  }
+
+  // null/undefinedを近隣補間
+  const valid=flat.filter(v=>v!=null);
+  const fallback=valid.length?valid.reduce((a,b)=>a+b,0)/valid.length:0;
+  flat=flat.map(v=>(v!=null?v:fallback));
+
+  const data2d=[];
+  for(let r=0;r<ROWS;r++){const row=[];for(let c=0;c<COLS;c++)row.push(flat[r*COLS+c]);data2d.push(row);}
+  data2d.reverse(); // 南→北 を 上→下 に
+
+  const minE=Math.round(Math.min(...flat));
+  const maxE=Math.round(Math.max(...flat));
+  const scale=getScale(bb);
+  return {data:data2d,rows:ROWS,cols:COLS,minE,maxE,
+          cellW:scale/COLS,cellH:scale/ROWS,totalW:scale,totalH:scale,
+          source:japan?'国土地理院':'Open-Meteo'};
+}
+
 async function fetchElevation() {
   const bb=state.bb;
-  showLoading(state.cityName,'標高データを取得中…',10);
+  const ROWS=20,COLS=20; // 20×20=400点
+  const japan=isJapan(bb);
+  showLoading(state.cityName,
+    japan?`標高データを取得中… (国土地理院 DEM5A, ${ROWS}×${COLS}点)`
+         :`標高データを取得中… (Open-Meteo, ${ROWS}×${COLS}点)`, 10);
   try {
-    const ROWS=10,COLS=10;
-    const dLat=(bb.maxLat-bb.minLat)/(ROWS-1), dLon=(bb.maxLon-bb.minLon)/(COLS-1);
-    const latArr=[],lonArr=[];
-    for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++){
-      latArr.push((bb.minLat+r*dLat).toFixed(5));
-      lonArr.push((bb.minLon+c*dLon).toFixed(5));
-    }
-    setProgress(30);
-    const url=`https://api.open-meteo.com/v1/elevation?latitude=${latArr.join(',')}&longitude=${lonArr.join(',')}`;
-    const res=await fetch(url); if(!res.ok) throw new Error('Open-Meteo HTTP '+res.status);
-    const json=await res.json(); const flat=json.elevation;
-    setProgress(80);
-    const data2d=[];
-    for(let r=0;r<ROWS;r++){const row=[];for(let c=0;c<COLS;c++)row.push(flat[r*COLS+c]);data2d.push(row);}
-    data2d.reverse();
-    const all=flat.filter(v=>v!=null);
-    const minE=Math.round(Math.min(...all)), maxE=Math.round(Math.max(...all));
-    const scale=getScale(bb);
-    state.elevGrid={data:data2d,rows:ROWS,cols:COLS,minE,maxE,cellW:scale/COLS,cellH:scale/ROWS,totalW:scale,totalH:scale};
-    document.getElementById('elev-min').textContent=minE+'m';
-    document.getElementById('elev-max').textContent=maxE+'m';
+    const grid=await fetchElevGrid(bb,ROWS,COLS,pct=>setProgress(pct));
+    setProgress(95);
+    state.elevGrid=grid;
+    document.getElementById('elev-min').textContent=grid.minE+'m';
+    document.getElementById('elev-max').textContent=grid.maxE+'m';
     updateInfoPanel(); updateLegends(); draw();
-    toast(`標高 ${minE}m〜${maxE}m`);
+    toast(`標高 ${grid.minE}m〜${grid.maxE}m（${grid.source}）`);
   } catch(err){toast('標高エラー: '+err.message,5000);}
   finally{hideLoading();}
 }
@@ -836,22 +894,11 @@ async function fetchAndParseRiversSilent(bb){
   state.rivers=parseWays(await overpassFetch(q),bb);
 }
 async function fetchElevationSilent(bb){
-  const ROWS=10,COLS=10;
-  const dLat=(bb.maxLat-bb.minLat)/(ROWS-1), dLon=(bb.maxLon-bb.minLon)/(COLS-1);
-  const latArr=[],lonArr=[];
-  for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++){latArr.push((bb.minLat+r*dLat).toFixed(5));lonArr.push((bb.minLon+c*dLon).toFixed(5));}
-  const url=`https://api.open-meteo.com/v1/elevation?latitude=${latArr.join(',')}&longitude=${lonArr.join(',')}`;
-  const res=await fetch(url); if(!res.ok) throw new Error('Open-Meteo '+res.status);
-  const flat=(await res.json()).elevation;
-  const data2d=[];
-  for(let r=0;r<ROWS;r++){const row=[];for(let c=0;c<COLS;c++)row.push(flat[r*COLS+c]);data2d.push(row);}
-  data2d.reverse();
-  const all=flat.filter(v=>v!=null);
-  const minE=Math.round(Math.min(...all)),maxE=Math.round(Math.max(...all));
-  const scale=getScale(bb);
-  state.elevGrid={data:data2d,rows:ROWS,cols:COLS,minE,maxE,cellW:scale/COLS,cellH:scale/ROWS,totalW:scale,totalH:scale};
-  document.getElementById('elev-min').textContent=minE+'m';
-  document.getElementById('elev-max').textContent=maxE+'m';
+  const ROWS=20,COLS=20;
+  const grid=await fetchElevGrid(bb,ROWS,COLS,null);
+  state.elevGrid=grid;
+  document.getElementById('elev-min').textContent=grid.minE+'m';
+  document.getElementById('elev-max').textContent=grid.maxE+'m';
 }
 async function fetchLanduseSilent(bb){
   const {minLat:s,minLon:w,maxLat:n,maxLon:e}=bb;
