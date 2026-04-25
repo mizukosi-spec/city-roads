@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>まちの道路を描く</title>
+<title>まちを描く</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@300;400;500;700&family=Zen+Kaku+Gothic+New:wght@300;400;700&display=swap" rel="stylesheet">
 <style>
@@ -140,9 +140,10 @@
 
   /* ── LEGENDS ── */
   #legends {
-    position:absolute;bottom:1rem;left:50%;transform:translateX(-50%);
-    display:flex;flex-direction:column;gap:.4rem;align-items:center;
+    position:absolute;bottom:1rem;left:1rem;
+    display:flex;flex-direction:column;gap:.4rem;align-items:flex-start;
     pointer-events:none;  /* 子要素で上書き */
+    max-width:280px;
   }
   .legend-box {
     background:var(--surface2);border:1px solid var(--border);border-radius:10px;
@@ -227,7 +228,7 @@
 
 <div id="ui">
   <div id="panel">
-    <h1 class="panel-title">まちの道路を描く</h1>
+    <h1 class="panel-title">まちを描く</h1>
     <p class="panel-sub">OpenStreetMapのデータを使って<br>都市の道路・河川・標高（国土地理院/Open-Meteo）・土地利用・農地を描画します</p>
     <div class="search-wrap">
       <input id="search" type="text" placeholder="都市名を入力（名古屋、大阪、Tokyo…）" autocomplete="off" spellcheck="false">
@@ -316,7 +317,8 @@ const state = {
   zoom: 1, panX: 0, panY: 0,
   dragging: false, dragStart: null,
   lineColor: '#1a1a1a',
-  bgDark: false,
+  bgDark: false,      // 地図描画時の背景（false=白）
+  panelOpen: true,   // 起動画面表示中フラグ
   // 各レイヤーのON/OFF（複数同時可）
   layers: { traffic: true, river: false, elev: false, land: false, farm: false },
   // 交通サブレイヤー表示フラグ
@@ -448,7 +450,7 @@ window.addEventListener('resize', resize); resize();
 function draw() {
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0,0,W,H);
-  ctx.fillStyle = state.bgDark ? '#0a0a0f' : '#ffffff';
+  ctx.fillStyle = state.panelOpen ? '#0a0a0f' : (state.bgDark ? '#0a0a0f' : '#ffffff');
   ctx.fillRect(0,0,W,H);
 
   const hasData = state.roads.length||state.rivers.length||state.elevGrid||state.landPolys.length;
@@ -1119,6 +1121,7 @@ async function fetchLanduseSilent(bb){
 }
 
 function showPostUI(name) {
+  state.panelOpen = false;  // 地図表示モードへ
   ['mini-search-wrap','toolbar','info'].forEach(id=>document.getElementById(id).classList.add('visible'));
   document.getElementById('info-city').textContent=name;
   document.getElementById('city-label').textContent=name;
@@ -1158,6 +1161,7 @@ document.getElementById('btn-download').addEventListener('click',()=>{
 document.getElementById('btn-reset').addEventListener('click',()=>{
   state.roads=[];state.rivers=[];state.elevGrid=null;state.landPolys=[];state.farmPolys=[];state.traffic=null;
   state.cityName='';state.bb=null;state.zoom=1;state.panX=0;state.panY=0;
+  state.panelOpen=true;
   draw();
   ['mini-search-wrap','toolbar','info','city-label','traffic-legend','elev-legend','land-legend','farm-legend'].forEach(id=>document.getElementById(id).classList.remove('visible'));
   document.getElementById('panel').classList.remove('hidden');
